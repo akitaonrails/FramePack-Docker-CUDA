@@ -71,8 +71,10 @@ RUN mkdir -p /app/outputs && \
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
+USER root
 RUN chmod +x /entrypoint.sh && \
     chown $UID:$GID /entrypoint.sh
+USER $UID:$GID
 
 EXPOSE 7860
 
