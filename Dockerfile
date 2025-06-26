@@ -1,26 +1,26 @@
-FROM nvidia/cuda:12.6.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.6.0-devel-ubuntu22.04 AS base
 
 # Set user/group IDs to match host user (default 1000 for first user)
 ARG UID=1000
 ARG GID=1000
+# Control compilation parallelism (4 jobs ~16GB RAM, 8 jobs ~32GB RAM, 64 jobs ~500GB RAM)
+ARG MAX_JOBS=4
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/app/venv \
     PATH="/app/venv/bin:$PATH" \
-    USER=appuser
+    USER=appuser \
+    MAX_JOBS=$MAX_JOBS
 
-# Create system user and group
-RUN groupadd -g $GID appuser && \
-    useradd -u $UID -g $GID -m -s /bin/bash appuser
-
-# Install dependencies as root first
+# Layer 1: Install system dependencies (most stable, cached longest)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3.10 \
     python3.10-venv \
     python3.10-dev \
+    python3-pip \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -28,54 +28,65 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     ninja-build \
     sudo \
-    && rm -rf /var/lib/apt/lists/* \
-    && echo "appuser ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create and configure directories before switching user
-RUN mkdir -p /app && \
+# Layer 2: Create user and basic directory structure early
+RUN groupadd -g $GID appuser && \
+    useradd -u $UID -g $GID -m -s /bin/bash appuser && \
+    echo "appuser ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers && \
+    mkdir -p /app /app/outputs /app/hf_download && \
     chown -R $UID:$GID /app
 
-# Switch to non-root user
+# Layer 3: Setup Python environment and clone repository (stable)
 USER $UID:$GID
-
-# Clone repository
-RUN git clone https://github.com/lllyasviel/FramePack /app
 WORKDIR /app
+RUN python3.10 -m venv $VIRTUAL_ENV && \
+    python -m pip install --upgrade pip wheel setuptools && \
+    git clone https://github.com/lllyasviel/FramePack /tmp/framepack && \
+    cp -r /tmp/framepack/* /app/ && \
+    rm -rf /tmp/framepack
 
-# Create virtual environment as user
-RUN python3.10 -m venv $VIRTUAL_ENV
-
-# Install Python dependencies
+# Layer 4: Install PyTorch ecosystem with specific CUDA version
 RUN pip install --no-cache-dir \
     torch==2.6.0 \
-    torchvision \
-    torchaudio \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
-# Install requirements
+# Layer 5: Install FramePack requirements (from the official requirements.txt)
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir triton sageattention
 
-# Install additional dependencies
-RUN pip install --no-cache-dir \
-    triton==3.0.0 \
-    sageattention==1.0.6
+# Layer 6: Install performance enhancements - triton and xformers
+RUN pip install --no-cache-dir triton==3.2.0 xformers
 
-# Create and configure directories before switching user
-RUN mkdir -p /app/outputs && \
-    chown -R $UID:$GID /app/outputs && \
-    mkdir -p $VIRTUAL_ENV && \
-    chown -R $UID:$GID $VIRTUAL_ENV && \
-    mkdir -p /app/hf_download && \
-    chown -R $UID:$GID /app/hf_download
+# Layer 7: Install sageattention (needs compilation from source)
+RUN python -m pip install --no-cache-dir sageattention==1.0.6
 
-# Copy entrypoint script
+# Layer 8: Install flash-attn (needs special compilation)
+RUN python -m pip -v install --no-cache-dir flash-attn --no-build-isolation
+
+# Verify PyTorch installation works correctly and check operator availability
+RUN python -c "import torch; import torchvision; import torchaudio; print(f'PyTorch: {torch.__version__}, TorchVision: {torchvision.__version__}, TorchAudio: {torchaudio.__version__}'); print('CUDA available:', torch.cuda.is_available()); import torchvision.ops; print('torchvision.ops loaded successfully')"
+
+# ===== APPLICATION STAGE =====
+FROM base AS application
+
+ARG UID=1000
+ARG GID=1000
+
+# Layer 9: Copy entrypoint script (changes occasionally)
+USER root
 COPY entrypoint.sh /entrypoint.sh
 USER root
 RUN chmod +x /entrypoint.sh && \
     chown $UID:$GID /entrypoint.sh
 USER $UID:$GID
 
+# Final configuration
+USER $UID:$GID
+WORKDIR /app
 EXPOSE 7860
 
 # Configure volumes
@@ -83,4 +94,4 @@ VOLUME /app/hf_download
 VOLUME /app/outputs
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "demo_gradio.py", "--share", "--server-name", "0.0.0.0"]
+CMD ["python", "demo_gradio.py", "--share", "--server", "0.0.0.0"]

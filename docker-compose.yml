@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  framepack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+        MAX_JOBS: ${MAX_JOBS:-4}
+    image: framepack-torch26-cu124:latest
+    container_name: framepack
+    ports:
+      - "7860:7860"
+    volumes:
+      - framepack_models:/app/hf_download
+      - ./outputs:/app/outputs
+    environment:
+      - UID=${UID:-1000}
+      - GID=${GID:-1000}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+volumes:
+  framepack_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${HF_MODELS_PATH:-./hf_download}
