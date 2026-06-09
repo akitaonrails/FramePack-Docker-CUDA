@@ -1,10 +1,14 @@
-FROM nvidia/cuda:12.6.0-devel-ubuntu22.04 AS base
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS base
 
 # Set user/group IDs to match host user (default 1000 for first user)
 ARG UID=1000
 ARG GID=1000
 # Control compilation parallelism (4 jobs ~16GB RAM, 8 jobs ~32GB RAM, 64 jobs ~500GB RAM)
 ARG MAX_JOBS=4
+# GPU architectures to compile flash-attn for. Default targets Blackwell (RTX
+# 50xx, sm_120). Override for other GPUs to avoid runtime fallback, e.g.
+# "8.0;8.6;8.9;9.0" for Ampere/Ada/Hopper. +PTX adds forward-compat JIT.
+ARG TORCH_CUDA_ARCH_LIST="12.0+PTX"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +16,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/app/venv \
     PATH="/app/venv/bin:$PATH" \
     USER=appuser \
-    MAX_JOBS=$MAX_JOBS
+    MAX_JOBS=$MAX_JOBS \
+    TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST
 
 # Layer 1: Install system dependencies (most stable, cached longest)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -48,20 +53,23 @@ RUN python3.10 -m venv $VIRTUAL_ENV && \
     cp -r /tmp/framepack/* /app/ && \
     rm -rf /tmp/framepack
 
-# Layer 4: Install PyTorch ecosystem with specific CUDA version
+# Layer 4: Install PyTorch ecosystem (CUDA 12.8 / cu128 for Blackwell sm_120 support)
 RUN pip install --no-cache-dir \
-    torch==2.6.0 \
-    torchvision==0.21.0 \
-    torchaudio==2.6.0 \
-    --index-url https://download.pytorch.org/whl/cu124
+    torch==2.8.0 \
+    torchvision==0.23.0 \
+    torchaudio==2.8.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # Layer 5: Install FramePack requirements (from the official requirements.txt)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Layer 6: Install performance enhancements - triton and xformers
-RUN pip install --no-cache-dir triton==3.2.0 xformers
+# Layer 6: Install performance enhancements - triton (matches torch 2.8) and
+# xformers (0.0.32.post2 is the build matched to torch 2.8.0 on the cu128 index)
+RUN pip install --no-cache-dir triton==3.4.0 && \
+    pip install --no-cache-dir xformers==0.0.32.post2 \
+    --index-url https://download.pytorch.org/whl/cu128
 
-# Layer 7: Install sageattention (needs compilation from source)
+# Layer 7: Install sageattention (pure-python wheel, uses triton kernels at runtime)
 RUN python -m pip install --no-cache-dir sageattention==1.0.6
 
 # Layer 8: Install flash-attn (needs special compilation)

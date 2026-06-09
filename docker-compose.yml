@@ -9,7 +9,7 @@ services:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
         MAX_JOBS: ${MAX_JOBS:-4}
-    image: framepack-torch26-cu124:latest
+    image: framepack-torch28-cu128:latest
     container_name: framepack
     ports:
       - "7860:7860"
